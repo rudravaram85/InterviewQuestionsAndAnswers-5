@@ -1,4 +1,4 @@
-If you're preparing for a **Java Microservices code review interview for 5+ years of experience**, the expectations are significantly higher than basic syntax or Spring Boot usage. Interviewers typically expect you to identify architectural issues, performance bottlenecks, security risks, and maintainability concerns.
+   If you're preparing for a **Java Microservices code review interview for 5+ years of experience**, the expectations are significantly higher than basic syntax or Spring Boot usage. Interviewers typically expect you to identify architectural issues, performance bottlenecks, security risks, and maintainability concerns.
 
 Here are the areas you should be comfortable reviewing:
 
@@ -1139,3 +1139,22 @@ That will make it easier to pinpoint the issue.
 
 
 If you're targeting companies like TCS, Infosys, Accenture, Capgemini, Cognizant, Wipro, HCL, Deloitte, or product-based companies, practicing reviews of real Spring Boot microservices is one of the best ways to prepare.
+
+In a Spring Boot application, initial (seed) data can be loaded into the database in several common ways. The best approach depends on whether you want data only during development, for testing, or in production.
+
+Option 1: data.sql (Simple and Recommended)
+
+Create a file:
+
+src/main/resources/data.sql
+
+Example:
+
+INSERT INTO users (id, name, email) VALUES (1, 'John Doe', 'john@example.com');
+INSERT INTO users (id, name, email) VALUES (2, 'Jane Smith', 'jane@example.com');
+
+If using JPA, also create schema.sql or let Hibernate generate the tables.
+
+
+
+
