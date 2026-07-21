@@ -1156,5 +1156,933 @@ INSERT INTO users (id, name, email) VALUES (2, 'Jane Smith', 'jane@example.com')
 If using JPA, also create schema.sql or let Hibernate generate the tables.
 
 
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Achieving idempotency across **multiple payment gateways** in Java is less about Java itself and more about designing a consistent payment orchestration layer. Since each gateway (Stripe, Razorpay, Adyen, PayPal, etc.) handles idempotency differently, your application should enforce idempotency independently.
+
+## Architecture
+
+```
+Client
+   |
+   | Payment Request (idempotencyKey)
+   |
+Payment API
+   |
+   +-----------------------------+
+   | Idempotency Service         |
+   | (DB/Redis)                  |
+   +-----------------------------+
+               |
+       Already processed?
+        /              \
+      Yes              No
+      |                 |
+Return saved      Call Payment Gateway
+response               |
+                        |
+                  Save response
+                        |
+                  Return response
+```
+
+## 1. Generate an Idempotency Key
+
+The client should send an idempotency key.
+
+```
+POST /payments
+
+Headers:
+Idempotency-Key: 8b9f5c6f-d3ae-4c23-a4b2-123456789abc
+```
+
+If the client doesn't provide one, your backend can generate it for internal workflows.
+
+---
+
+## 2. Create an Idempotency Table
+
+Example:
+
+```sql
+CREATE TABLE payment_idempotency (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    idempotency_key VARCHAR(100) UNIQUE,
+    request_hash VARCHAR(64),
+    status VARCHAR(20),
+    response TEXT,
+    created_at TIMESTAMP
+);
+```
+
+Fields:
+
+* idempotency_key
+* request_hash
+* status
+* response
+* timestamp
+
+---
+
+## 3. Hash the Request
+
+This prevents someone from sending the same key with different payment details.
+
+```java
+String payload = objectMapper.writeValueAsString(paymentRequest);
+
+String requestHash = DigestUtils.sha256Hex(payload);
+```
+
+If
+
+```
+idempotencyKey == same
+```
+
+but
+
+```
+requestHash != existingHash
+```
+
+return
+
+```
+409 Conflict
+```
+
+---
+
+## 4. Use Database Locking
+
+Example using Spring Data JPA:
+
+```java
+@Transactional
+public PaymentResponse processPayment(
+        String idempotencyKey,
+        PaymentRequest request) {
+
+    Optional<PaymentRecord> existing =
+            repository.findByIdempotencyKey(idempotencyKey);
+
+    if (existing.isPresent()) {
+        return existing.get().getResponse();
+    }
+
+    PaymentRecord record = new PaymentRecord();
+    record.setIdempotencyKey(idempotencyKey);
+    record.setStatus("PROCESSING");
+
+    repository.save(record);
+
+    PaymentResponse response = gateway.charge(request);
+
+    record.setStatus("SUCCESS");
+    record.setResponse(response);
+
+    repository.save(record);
+
+    return response;
+}
+```
+
+Better yet, rely on a **UNIQUE** constraint on `idempotency_key` and handle duplicate insert exceptions to avoid race conditions.
+
+---
+
+## 5. Gateway Abstraction
+
+```java
+public interface PaymentGateway {
+
+    PaymentResponse charge(PaymentRequest request);
+}
+```
+
+Implementations:
+
+```java
+StripeGateway
+
+RazorpayGateway
+
+PayPalGateway
+
+AdyenGateway
+```
+
+Your payment service should not care which gateway is used.
+
+---
+
+## 6. Pass the Gateway's Idempotency Key
+
+Many gateways support idempotency.
+
+Example:
+
+```java
+HttpHeaders headers = new HttpHeaders();
+
+headers.add("Idempotency-Key", idempotencyKey);
+```
+
+Even if the gateway supports idempotency, **still maintain your own idempotency layer**, because:
+
+* Not all gateways support it.
+* Different gateways retain keys for different time periods.
+* You want consistent behavior regardless of provider.
+
+---
+
+## 7. Handle Failures
+
+Consider these scenarios:
+
+| Scenario                                  | Action                                                                             |
+| ----------------------------------------- | ---------------------------------------------------------------------------------- |
+| Request timed out before reaching gateway | Retry with same key                                                                |
+| Gateway charged but response lost         | Retry with same key; if supported, gateway idempotency returns the original result |
+| Server crashed after charging             | Recover using stored state and reconciliation/webhooks                             |
+| Duplicate client request                  | Return cached response                                                             |
+| Different payload with same key           | Return `409 Conflict`                                                              |
+
+---
+
+## 8. Handle Concurrent Requests
+
+Suppose two requests arrive simultaneously with the same key.
+
+Bad:
+
+```
+Thread A -> No record
+Thread B -> No record
+
+Both charge card
+```
+
+Good:
+
+```
+Thread A -> INSERT PROCESSING
+
+Thread B -> Unique constraint violation
+
+Thread B -> Fetch existing row
+
+Return existing result
+```
+
+This can be implemented using:
+
+* Database unique constraints.
+* `SELECT ... FOR UPDATE`.
+* Optimistic or pessimistic locking.
+* Distributed locks (e.g., Redis) if you have multiple application instances, though a database unique constraint is often sufficient.
+
+---
+
+## 9. Store the Final Response
+
+Example:
+
+```json
+{
+  "paymentId": "pay_12345",
+  "status": "SUCCESS",
+  "amount": 1000
+}
+```
+
+Subsequent requests with the same key simply return this stored response.
+
+---
+
+## 10. Example Flow
+
+```
+Request #1
+------------
+Key = abc123
+
+DB -> Not found
+
+↓
+
+Gateway Charge
+
+↓
+
+SUCCESS
+
+↓
+
+Save response
+
+↓
+
+Return SUCCESS
+```
+
+```
+Request #2 (same key)
+
+↓
+
+DB -> Found
+
+↓
+
+Return cached response
+
+(No gateway call)
+```
+
+---
+
+## 11. Multi-Gateway Considerations
+
+If your system can retry on another gateway after a failure, the idempotency record should capture the orchestration state. For example:
+
+```
+PaymentRequest
+    |
+    | Key = abc123
+    |
+    +--> Stripe (failed before authorization)
+    |
+    +--> Razorpay (succeeded)
+```
+
+The idempotency record should store:
+
+* `idempotencyKey`
+* `merchantOrderId`
+* `selectedGateway`
+* `gatewayTransactionId`
+* Overall payment status
+* Serialized response
+
+This ensures that retries with the same key return the successful Razorpay result rather than attempting another charge.
+
+## Best Practices
+
+* Generate or require a unique idempotency key per payment attempt.
+* Enforce a unique constraint on the idempotency key in the database.
+* Store a hash of the request to detect conflicting reuse of a key.
+* Save the final response and return it for duplicate requests.
+* Pass the same idempotency key to gateways that support it, but do not depend solely on gateway-level idempotency.
+* Design payment state transitions (`PROCESSING`, `SUCCESS`, `FAILED`, `UNKNOWN`) carefully and use webhooks or reconciliation jobs to resolve uncertain outcomes.
+* Make the orchestration layer—not individual gateway implementations—the source of truth for idempotency. This keeps behavior consistent even when gateways have different APIs or capabilities.
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+`Collections.synchronizedMap()` is a method in Java that returns a **thread-safe (synchronized) wrapper** around an existing `Map`. It ensures that only one thread can access the map at a time.
+
+### Syntax
+
+```java
+Map<K, V> syncMap = Collections.synchronizedMap(new HashMap<>());
+```
+
+### Example
+
+```java
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        Map<Integer, String> map = Collections.synchronizedMap(new HashMap<>());
+
+        map.put(1, "Apple");
+        map.put(2, "Banana");
+
+        System.out.println(map.get(1)); // Apple
+    }
+}
+```
+
+### Iterating over a synchronized map
+
+Even though the map is synchronized, **iteration must be manually synchronized** to avoid concurrent modification issues.
+
+```java
+Map<Integer, String> map = Collections.synchronizedMap(new HashMap<>());
+
+synchronized (map) {
+    for (Map.Entry<Integer, String> entry : map.entrySet()) {
+        System.out.println(entry.getKey() + " : " + entry.getValue());
+    }
+}
+```
+
+### When to use
+
+* When multiple threads need to share a `Map`.
+* When you already have a `HashMap` (or another `Map`) and want to make it thread-safe without changing its type.
+
+### Limitations
+
+* Uses a **single lock** for all operations, so only one thread can access the map at a time. This can reduce performance under high concurrency.
+* Iteration still requires external synchronization.
+
+### `Collections.synchronizedMap()` vs `ConcurrentHashMap`
+
+| Feature       | `Collections.synchronizedMap()` | `ConcurrentHashMap`                                                |
+| ------------- | ------------------------------- | ------------------------------------------------------------------ |
+| Thread safety | Yes                             | Yes                                                                |
+| Locking       | Single lock for entire map      | Fine-grained locking / high concurrency                            |
+| Iteration     | Must synchronize manually       | Safe without external synchronization (weakly consistent iterator) |
+| Performance   | Lower under heavy concurrency   | Better under heavy concurrency                                     |
+
+### Recommendation
+
+* Use **`Collections.synchronizedMap()`** for simple thread-safe access when contention is low.
+* Use **`ConcurrentHashMap`** in highly concurrent applications, as it generally provides better scalability and performance.
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Concurrency issues in Spring Boot are usually not caused by Spring Boot itself—they arise when multiple threads access shared resources (memory, caches, files, databases, etc.) at the same time. The right solution depends on where the shared state exists.
+
+Here are the most common approaches.
+
+### 1. Make beans stateless (Best Practice)
+
+Spring `@Service` beans are singletons by default. If you store mutable state in them, multiple requests can modify it simultaneously.
+
+**Problem:**
+
+```java
+@Service
+public class CounterService {
+
+    private int counter = 0;
+
+    public int increment() {
+        return ++counter;
+    }
+}
+```
+
+Multiple users calling `increment()` can cause race conditions.
+
+**Solution:**
+Keep services stateless.
+
+```java
+@Service
+public class OrderService {
+
+    public Order createOrder(OrderRequest request) {
+        // No shared mutable variables
+    }
+}
+```
+
+---
+
+## 2. Use synchronized
+
+For small critical sections:
+
+```java
+public synchronized void updateInventory() {
+    // only one thread executes at a time
+}
+```
+
+or
+
+```java
+public void updateInventory() {
+    synchronized(this) {
+        // critical section
+    }
+}
+```
+
+**Pros**
+
+* Easy
+* Built into Java
+
+**Cons**
+
+* Can reduce performance
+* Doesn't work across multiple application instances
+
+---
+
+## 3. Use Atomic classes
+
+Instead of
+
+```java
+private int count;
+```
+
+Use
+
+```java
+private AtomicInteger count = new AtomicInteger();
+
+public int increment() {
+    return count.incrementAndGet();
+}
+```
+
+Other useful classes:
+
+* `AtomicInteger`
+* `AtomicLong`
+* `AtomicReference`
+* `LongAdder` (better under heavy contention)
+
+---
+
+## 4. Use Locks
+
+For more control than `synchronized`.
+
+```java
+private Lock lock = new ReentrantLock();
+
+public void update() {
+    lock.lock();
+    try {
+        // critical code
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+Useful when you need:
+
+* timeout
+* fairness
+* interruptible locking
+* multiple conditions
+
+---
+
+## 5. Database Locking
+
+If multiple users update the same database row, use locking.
+
+### Optimistic Locking
+
+Best when conflicts are rare.
+
+```java
+@Entity
+public class Product {
+
+    @Id
+    private Long id;
+
+    @Version
+    private Long version;
+}
+```
+
+If two users update simultaneously:
+
+* First update succeeds
+* Second throws `OptimisticLockException`
+
+This is the recommended approach for many business applications.
+
+---
+
+### Pessimistic Locking
+
+```java
+@Lock(LockModeType.PESSIMISTIC_WRITE)
+@Query("select p from Product p where p.id = :id")
+Product findByIdForUpdate(Long id);
+```
+
+The row is locked until the transaction completes.
+
+Useful for:
+
+* banking
+* inventory
+* ticket booking
+
+---
+
+## 6. Transaction Management
+
+Use transactions to keep related operations atomic.
+
+```java
+@Transactional
+public void transferMoney(...) {
+    withdraw();
+    deposit();
+}
+```
+
+Choose appropriate isolation levels:
+
+```java
+@Transactional(isolation = Isolation.REPEATABLE_READ)
+```
+
+Common isolation levels:
+
+* READ_UNCOMMITTED
+* READ_COMMITTED
+* REPEATABLE_READ
+* SERIALIZABLE (most strict, lowest concurrency)
+
+---
+
+## 7. Concurrent Collections
+
+Instead of:
+
+```java
+HashMap<String, User>
+```
+
+Use:
+
+```java
+ConcurrentHashMap<String, User>
+```
+
+Other concurrent collections:
+
+* `CopyOnWriteArrayList`
+* `ConcurrentLinkedQueue`
+* `BlockingQueue`
+
+---
+
+## 8. Thread-safe Caching
+
+If using caches, use thread-safe implementations.
+
+Example:
+
+```java
+ConcurrentHashMap<Long, Product> cache = new ConcurrentHashMap<>();
+```
+
+Or use Spring Cache with a thread-safe cache provider like Caffeine or Redis.
+
+---
+
+## 9. Distributed Locking
+
+If your application runs on multiple servers, Java locks (`synchronized`, `ReentrantLock`) won't coordinate across instances.
+
+Use a distributed locking mechanism such as:
+
+* Redis-based locks (e.g., Redisson)
+* Database locks
+* ZooKeeper
+* etcd
+
+---
+
+## 10. Asynchronous Processing
+
+If many threads compete for the same resource, offload work using asynchronous processing.
+
+Example:
+
+```java
+@Async
+public CompletableFuture<Void> processOrder() {
+    ...
+}
+```
+
+Or use a message queue like RabbitMQ or Kafka to serialize processing for specific workloads.
+
+---
+
+## 11. Prevent Lost Updates
+
+Example:
+
+```
+Inventory = 10
+
+Thread A reads 10
+Thread B reads 10
+
+A writes 9
+B writes 9
+```
+
+Expected:
+
+```
+8
+```
+
+Actual:
+
+```
+9
+```
+
+Solutions:
+
+* Optimistic locking
+* Pessimistic locking
+* Atomic database updates:
+
+```sql
+UPDATE product
+SET quantity = quantity - 1
+WHERE id = ?
+```
+
+instead of:
+
+```java
+quantity = quantity - 1;
+save(quantity);
+```
+
+---
+
+## Example Interview Scenario
+
+**Problem:** Two users place the last item in stock simultaneously.
+
+**Poor implementation:**
+
+```java
+Product p = repository.findById(id);
+
+if (p.getStock() > 0) {
+    p.setStock(p.getStock() - 1);
+    repository.save(p);
+}
+```
+
+Both users may see stock = 1 and both purchase it.
+
+**Better implementation:**
+
+```java
+@Transactional
+public void purchase(Long id) {
+
+    Product p = repository.findByIdForUpdate(id);
+
+    if (p.getStock() <= 0)
+        throw new OutOfStockException();
+
+    p.setStock(p.getStock() - 1);
+}
+```
+
+Or use optimistic locking with a `@Version` field and retry the transaction if an `OptimisticLockException` occurs.
+
+---
+
+## Which approach should you choose?
+
+| Scenario                               | Recommended Solution                                   |
+| -------------------------------------- | ------------------------------------------------------ |
+| Stateless business logic               | Keep Spring beans stateless                            |
+| Shared in-memory counter               | `AtomicInteger` or `LongAdder`                         |
+| Protect a small critical section       | `synchronized`                                         |
+| Advanced thread coordination           | `ReentrantLock`                                        |
+| Multiple threads using collections     | `ConcurrentHashMap` and other concurrent collections   |
+| Concurrent database updates            | `@Version` (optimistic locking)                        |
+| High-conflict database operations      | Pessimistic locking                                    |
+| Multiple DB operations as one unit     | `@Transactional`                                       |
+| Multiple application instances         | Distributed locking (e.g., Redis)                      |
+| High-throughput asynchronous workloads | Queues (Kafka, RabbitMQ) or `@Async` where appropriate |
+
+### Interview tip
+
+If asked, "How do you handle concurrency in Spring Boot?", a strong answer is:
+
+> "I first avoid shared mutable state by keeping Spring beans stateless. For in-memory concurrency, I use thread-safe constructs like `AtomicInteger`, `ConcurrentHashMap`, or `ReentrantLock` as appropriate. For database concurrency, I rely on transactions and optimistic locking using `@Version`; if contention is high or strict consistency is required, I use pessimistic locking. In distributed deployments, I use distributed locks or database-level coordination rather than Java synchronization primitives."
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Custom exceptions in Java let you define application-specific error types that make your code easier to understand and handle.
+
+## Why use custom exceptions?
+
+Custom exceptions help you:
+
+* Represent specific error conditions (e.g., `InvalidAgeException`, `InsufficientBalanceException`)
+* Improve code readability
+* Handle different errors separately
+* Provide meaningful error messages
+
+## Types of Custom Exceptions
+
+There are two types:
+
+1. **Checked Exceptions** (extend `Exception`)
+
+   * Checked at compile time.
+   * Must be handled using `try-catch` or declared with `throws`.
+
+2. **Unchecked Exceptions** (extend `RuntimeException`)
+
+   * Checked at runtime.
+   * Handling is optional.
+
+---
+
+## 1. Creating a Checked Custom Exception
+
+```java
+class InvalidAgeException extends Exception {
+
+    public InvalidAgeException(String message) {
+        super(message);
+    }
+}
+```
+
+### Using it
+
+```java
+public class Voting {
+
+    static void checkAge(int age) throws InvalidAgeException {
+        if (age < 18) {
+            throw new InvalidAgeException("Age must be at least 18 to vote.");
+        }
+
+        System.out.println("Eligible to vote.");
+    }
+
+    public static void main(String[] args) {
+        try {
+            checkAge(16);
+        } catch (InvalidAgeException e) {
+            System.out.println(e.getMessage());
+        }
+    }
+}
+```
+
+**Output:**
+
+```
+Age must be at least 18 to vote.
+```
+
+---
+
+## 2. Creating an Unchecked Custom Exception
+
+```java
+class InsufficientBalanceException extends RuntimeException {
+
+    public InsufficientBalanceException(String message) {
+        super(message);
+    }
+}
+```
+
+### Using it
+
+```java
+public class BankAccount {
+
+    static void withdraw(double balance, double amount) {
+        if (amount > balance) {
+            throw new InsufficientBalanceException("Insufficient balance.");
+        }
+
+        System.out.println("Withdrawal successful.");
+    }
+
+    public static void main(String[] args) {
+        withdraw(1000, 1500);
+    }
+}
+```
+
+**Output:**
+
+```
+Exception in thread "main"
+InsufficientBalanceException: Insufficient balance.
+```
+
+---
+
+## Custom Exception with Multiple Constructors
+
+```java
+class MyException extends Exception {
+
+    public MyException() {
+        super();
+    }
+
+    public MyException(String message) {
+        super(message);
+    }
+
+    public MyException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public MyException(Throwable cause) {
+        super(cause);
+    }
+}
+```
+
+---
+
+## Best Practices
+
+* Choose **checked exceptions** for recoverable conditions that callers are expected to handle.
+* Choose **unchecked exceptions** (`RuntimeException`) for programming errors or invalid API usage.
+* Use descriptive names ending with `Exception`.
+* Include meaningful error messages.
+* Preserve the original cause when wrapping another exception:
+
+```java
+try {
+    // code that throws IOException
+} catch (IOException e) {
+    throw new MyException("Failed to read file.", e);
+}
+```
+
+---
+
+## Summary
+
+| Feature                | Checked Exception  | Unchecked Exception               |
+| ---------------------- | ------------------ | --------------------------------- |
+| Base class             | `Exception`        | `RuntimeException`                |
+| Compile-time checking  | Yes                | No                                |
+| Must handle or declare | Yes                | No                                |
+| Use case               | Recoverable errors | Programming errors, invalid input |
+
+Custom exceptions make Java applications more maintainable by providing clear, domain-specific error types instead of relying only on generic exceptions like `Exception` or `RuntimeException`.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
 
 
