@@ -2082,6 +2082,165 @@ Custom exceptions make Java applications more maintainable by providing clear, d
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 
+When multiple classes implement the same interface in Java, how you "resolve" them depends on what you're trying to do. Here are the common scenarios.
+
+### 1. Choose the implementation explicitly
+
+If you have multiple implementations, instantiate the one you want.
+
+```java
+interface PaymentService {
+    void pay(double amount);
+}
+
+class CreditCardPayment implements PaymentService {
+    public void pay(double amount) {
+        System.out.println("Paid using credit card");
+    }
+}
+
+class PayPalPayment implements PaymentService {
+    public void pay(double amount) {
+        System.out.println("Paid using PayPal");
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        PaymentService service = new CreditCardPayment();
+        service.pay(100);
+    }
+}
+```
+
+You simply decide which implementation to assign to the interface reference.
+
+---
+
+### 2. Use dependency injection (Spring)
+
+If you're using Spring and there are multiple beans implementing the same interface, you'll get an error like:
+
+```
+NoUniqueBeanDefinitionException:
+expected single matching bean but found 2
+```
+
+Resolve it using one of these approaches.
+
+**`@Primary`**
+
+```java
+@Component
+@Primary
+class CreditCardPayment implements PaymentService {
+}
+```
+
+Now Spring injects this implementation by default.
+
+**`@Qualifier`**
+
+```java
+@Component("paypal")
+class PayPalPayment implements PaymentService {
+}
+
+@Component("credit")
+class CreditCardPayment implements PaymentService {
+}
+
+@Service
+class CheckoutService {
+
+    @Autowired
+    public CheckoutService(@Qualifier("paypal") PaymentService paymentService) {
+        this.paymentService = paymentService;
+    }
+}
+```
+
+---
+
+### 3. Inject all implementations
+
+Sometimes you want all implementations.
+
+```java
+@Autowired
+private List<PaymentService> paymentServices;
+```
+
+or
+
+```java
+@Autowired
+private Map<String, PaymentService> paymentServices;
+```
+
+Spring injects every implementation.
+
+---
+
+### 4. Select an implementation at runtime (Strategy Pattern)
+
+```java
+Map<String, PaymentService> services = Map.of(
+    "credit", new CreditCardPayment(),
+    "paypal", new PayPalPayment()
+);
+
+PaymentService service = services.get(userChoice);
+service.pay(100);
+```
+
+This is useful when the implementation depends on user input, configuration, or business rules.
+
+---
+
+### 5. If a class implements multiple interfaces with the same default method
+
+Suppose:
+
+```java
+interface A {
+    default void print() {
+        System.out.println("A");
+    }
+}
+
+interface B {
+    default void print() {
+        System.out.println("B");
+    }
+}
+
+class Test implements A, B {
+    @Override
+    public void print() {
+        A.super.print();   // or B.super.print()
+    }
+}
+```
+
+The compiler forces you to override `print()` because it cannot determine which default implementation to use.
+
+---
+
+## Summary
+
+| Situation                                     | Solution                                                                |
+| --------------------------------------------- | ----------------------------------------------------------------------- |
+| Multiple classes implement the same interface | Instantiate the desired implementation.                                 |
+| Spring has multiple beans                     | Use `@Primary` or `@Qualifier`.                                         |
+| Need all implementations                      | Inject a `List<Interface>` or `Map<String, Interface>`.                 |
+| Choose implementation dynamically             | Use the Strategy Pattern or a factory.                                  |
+| Multiple inherited default methods conflict   | Override the method and explicitly call `InterfaceName.super.method()`. |
+
+If your question is specifically about **plain Java**, **Spring Boot**, or **interview questions**, I can tailor the explanation further.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 
 
 
