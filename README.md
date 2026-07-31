@@ -2241,6 +2241,214 @@ If your question is specifically about **plain Java**, **Spring Boot**, or **int
 
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+Yes — this is a **very good 5+ years Java microservices interview scenario**.
+
+If an interviewer says:
+
+> **“The same JWT works with Microservice 1 but fails with Microservice 2. What could be wrong?”**
+
+They are testing whether you understand **distributed authentication, JWT validation, Spring Security configuration, and service-to-service consistency**.
+
+### Strong interview answer
+
+> “If the same JWT is accepted by Service 1 but rejected by Service 2, I would first determine whether the failure is authentication or authorization. Since JWT validation is normally stateless, both services should independently validate the token using the same trusted issuer/signing key and compatible validation rules.
+>
+> I would compare the security configuration of both services — issuer, signing key/JWK configuration, algorithm, audience, token expiration, clock synchronization, and required scopes/roles.
+>
+> If Service 1 returns 200 but Service 2 returns 401, I would primarily investigate token validation differences. If Service 2 returns 403, the token was likely authenticated but the user's roles or scopes don't satisfy Service 2's authorization rules.”
+
+### What I would check
+
+| Check               | Service 1 | Service 2         | Possible problem           |
+| ------------------- | --------- | ----------------- | -------------------------- |
+| `iss`               | Same      | Different         | Issuer mismatch            |
+| Signature key       | Same      | Different         | Signature validation fails |
+| Algorithm           | RS256     | HS256             | Algorithm mismatch         |
+| `aud`               | service-1 | service-2         | Audience validation        |
+| `exp`               | Valid     | Expired           | Clock/time issue           |
+| `nbf`               | Valid     | Not active        | Clock skew                 |
+| Roles/scopes        | `ADMIN`   | `USER` required   | Authorization              |
+| JWK URL             | Correct   | Wrong/unreachable | Public key retrieval       |
+| JWT config          | Correct   | Different         | Configuration drift        |
+| Authorization rules | Permitted | Denied            | 403                        |
+
+### The most important distinction
+
+#### `401 Unauthorized`
+
+Usually means:
+
+```text
+Request
+   ↓
+Service 2
+   ↓
+JWT validation
+   ↓
+❌ Invalid token
+   ↓
+401
+```
+
+Investigate:
+
+```text
+Signature
+Issuer
+Expiration
+Audience
+Algorithm
+JWK/public key
+Clock skew
+```
+
+#### `403 Forbidden`
+
+Usually means:
+
+```text
+Request
+   ↓
+Service 2
+   ↓
+JWT validated successfully ✅
+   ↓
+Authorization check
+   ↓
+❌ Missing role/scope
+   ↓
+403
+```
+
+For example:
+
+```json
+{
+  "sub": "12345",
+  "iss": "https://auth.company.com",
+  "aud": "payments",
+  "scope": "payment:read",
+  "exp": 1785500000
+}
+```
+
+Service 1 might require:
+
+```text
+payment:read
+```
+
+while Service 2 requires:
+
+```text
+payment:write
+```
+
+The JWT is valid, but Service 2 rejects the request because the **authorization requirement is different**.
+
+---
+
+## One particularly good interview point
+
+If all three microservices use the same authentication infrastructure, I would **not immediately regenerate the JWT**.
+
+I'd ask:
+
+> **“Is Service 2 returning 401 or 403?”**
+
+That's a strong first diagnostic question.
+
+Then:
+
+```text
+             JWT
+              │
+              ▼
+       ┌──────────────┐
+       │ Microservice │
+       │      1       │
+       └──────┬───────┘
+              │
+          JWT valid
+              │
+              ▼
+       ┌──────────────┐
+       │ Microservice │
+       │      2       │
+       └──────┬───────┘
+              │
+       ┌──────┴───────┐
+       │              │
+      401            403
+       │              │
+ Token validation   Authorization
+    problem           problem
+```
+
+### If they ask: "How would you troubleshoot it?"
+
+I would answer:
+
+> “First I would capture the exact HTTP status and security logs from Service 2. Then I would decode the JWT payload — without exposing the token itself — and compare `iss`, `aud`, `exp`, `nbf`, scopes and roles. Next I'd compare Service 1 and Service 2's Spring Security resource-server configuration, especially issuer/JWK configuration and audience validation. I'd also verify that both services trust the same signing key and algorithm and check clock synchronization. If authentication succeeds but authorization fails, I'd inspect the `GrantedAuthority` mapping and endpoint authorization rules.”
+
+For Spring Boot, the configuration areas I'd compare are typically:
+
+```yaml
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ...
+```
+
+and, depending on the architecture:
+
+```text
+issuer-uri
+jwk-set-uri
+public key
+audience validator
+JWT decoder
+authorities converter
+SecurityFilterChain
+@PreAuthorize
+requestMatchers
+```
+
+### ⭐ Interviewer's hidden expectation
+
+They aren't really asking:
+
+> **“Why is JWT broken?”**
+
+They're asking whether you understand this distinction:
+
+**Authentication**
+
+```text
+Who are you?
+       ↓
+JWT valid?
+       ↓
+YES
+```
+
+**Authorization**
+
+```text
+What are you allowed to do?
+       ↓
+Role / Scope / Permission
+       ↓
+YES / NO
+```
+
+So your **best one-line opening answer** is:
+
+> **“First I would distinguish 401 from 403. A 401 points toward JWT validation/configuration differences between the services; a 403 usually means the JWT is valid but Service 2's authorization rules, roles, scopes, or authority mapping are different.”**
+
+That is a strong **5+ years microservices interview answer**.
 
 
 
