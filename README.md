@@ -1,3 +1,277 @@
+This is a very common **5+ years Spring Boot interview question**.
+
+> **Interviewer:** *"How do you trace a particular request in a Spring Boot controller?"*
+
+They are usually checking whether you know **logging, correlation IDs, MDC, tracing, and observability**.
+
+---
+
+# Answer 1 (Basic - Logging)
+
+Every request should have a unique identifier.
+
+Example:
+
+```java
+@RestController
+@RequestMapping("/employees")
+public class EmployeeController {
+
+    private static final Logger log =
+            LoggerFactory.getLogger(EmployeeController.class);
+
+    @GetMapping("/{id}")
+    public Employee getEmployee(@PathVariable int id) {
+
+        log.info("Received request for employee {}", id);
+
+        Employee employee = service.find(id);
+
+        log.info("Returning employee {}", employee.getName());
+
+        return employee;
+    }
+}
+```
+
+Logs
+
+```
+Received request for employee 100
+Returning employee John
+```
+
+Problem:
+
+If 1000 users call simultaneously,
+
+```
+Received request...
+Received request...
+Received request...
+Returning...
+Returning...
+```
+
+You don't know which log belongs to which request.
+
+---
+
+# Answer 2 (Best Practice - Correlation ID)
+
+Generate one ID per request.
+
+Example
+
+```
+X-Correlation-Id:
+6cbcc0d5-321c-4bda-8ab4-1d34a2f1d882
+```
+
+Every log contains
+
+```
+6cbcc0d5-321c-4bda-8ab4-1d34a2f1d882
+```
+
+Now you can search
+
+```
+grep 6cbcc0d5 logs.log
+```
+
+and get the complete flow.
+
+---
+
+# Answer 3 (Using MDC)
+
+Spring applications usually use **MDC (Mapped Diagnostic Context)**.
+
+Filter
+
+```java
+@Component
+public class CorrelationFilter extends OncePerRequestFilter {
+
+    @Override
+    protected void doFilterInternal(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            FilterChain chain)
+            throws ServletException, IOException {
+
+        String correlationId = UUID.randomUUID().toString();
+
+        MDC.put("correlationId", correlationId);
+
+        try {
+            chain.doFilter(request, response);
+        } finally {
+            MDC.clear();
+        }
+    }
+}
+```
+
+Logging pattern
+
+```yaml
+logging:
+  pattern:
+    level: "%5p [%X{correlationId}]"
+```
+
+Logs
+
+```
+INFO [6cbcc0d5] Request started
+INFO [6cbcc0d5] Calling Service
+INFO [6cbcc0d5] Calling Repository
+INFO [6cbcc0d5] Response sent
+```
+
+Now every log belongs to one request.
+
+---
+
+# Answer 4 (Interceptor)
+
+Instead of Filter, many companies use an interceptor.
+
+```java
+public class LoggingInterceptor implements HandlerInterceptor {
+
+    @Override
+    public boolean preHandle(HttpServletRequest request,
+                             HttpServletResponse response,
+                             Object handler) {
+
+        log.info("Incoming {} {}",
+                request.getMethod(),
+                request.getRequestURI());
+
+        return true;
+    }
+}
+```
+
+This traces every controller request.
+
+---
+
+# Answer 5 (Distributed Tracing - Production)
+
+In microservices, a request may go through:
+
+```
+Gateway
+     ↓
+User Service
+     ↓
+Order Service
+     ↓
+Payment Service
+     ↓
+Notification Service
+```
+
+Simple logging isn't enough.
+
+Use **OpenTelemetry** to generate:
+
+* Trace ID
+* Span ID
+
+Example log pattern
+
+```yaml
+logging:
+  pattern:
+    level: "%5p [${spring.application.name},%X{trace_id},%X{span_id}]"
+```
+
+Logs
+
+```
+INFO [order-service,
+4bf92f3577b34da6a3ce929d0e0e4736,
+00f067aa0ba902b7]
+```
+
+Search by **Trace ID** to see the entire request across all microservices.
+
+---
+
+# Answer 6 (View Trace in Grafana Tempo / Jaeger)
+
+Suppose a customer says
+
+> Payment failed at 10:30.
+
+Search
+
+```
+Trace ID
+
+4bf92f3577b34da6a3ce929d0e0e4736
+```
+
+You'll see
+
+```
+Gateway
+   │
+   ├── Authentication
+   │
+   ├── Order Service
+   │      │
+   │      ├── Inventory
+   │      │
+   │      └── Payment
+   │
+   └── Notification
+```
+
+Every span shows
+
+* execution time
+* SQL queries
+* HTTP calls
+* exceptions
+* retries
+
+This is how production debugging is typically done.
+
+---
+
+# If the interviewer asks specifically about the Controller
+
+You can answer:
+
+```java
+@GetMapping("/{id}")
+public Employee getEmployee(@PathVariable int id) {
+
+    log.info("TraceId={}, Fetching employee {}",
+            MDC.get("trace_id"),
+            id);
+
+    return service.find(id);
+}
+```
+
+If using OpenTelemetry, `trace_id` is automatically populated in the MDC, so every controller log can be correlated with the complete distributed trace.
+
+---
+
+## A strong interview answer
+
+> "In development, I trace requests using SLF4J logs in the controller and service layers. For concurrent requests, I use a Correlation ID stored in MDC so every log line belongs to a specific request. In production microservices, we use OpenTelemetry to generate Trace IDs and Span IDs, which are automatically propagated across services. The logs include these IDs, and tools like Grafana Tempo or Jaeger let us search by Trace ID to view the complete request path, timings, downstream calls, and errors across all services."
+
+This demonstrates knowledge of both traditional request logging and modern distributed tracing, which is what most experienced Spring Boot interviewers are looking for.
+
+   
    If you're preparing for a **Java Microservices code review interview for 5+ years of experience**, the expectations are significantly higher than basic syntax or Spring Boot usage. Interviewers typically expect you to identify architectural issues, performance bottlenecks, security risks, and maintainability concerns.
 
 Here are the areas you should be comfortable reviewing:
