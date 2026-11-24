@@ -1,3 +1,57 @@
+
+import java.util.ArrayDeque;
+import java.util.Deque;
+
+public class ValidParentheses {
+
+    public static boolean isValid(String s) {
+
+        Deque<Character> stack = new ArrayDeque<>();
+
+        for (char ch : s.toCharArray()) {
+
+            // Opening brackets
+            if (ch == '(' || ch == '{' || ch == '[') {
+                stack.push(ch);
+            }
+
+            // Closing brackets
+            else {
+
+                if (stack.isEmpty()) {
+                    return false;
+                }
+
+                char top = stack.pop();
+
+                if (ch == ')' && top != '(') {
+                    return false;
+                }
+
+                if (ch == '}' && top != '{') {
+                    return false;
+                }
+
+                if (ch == ']' && top != '[') {
+                    return false;
+                }
+            }
+        }
+
+        return stack.isEmpty();
+    }
+
+    public static void main(String[] args) {
+
+        String s1 = "[()()]{}";
+        String s2 = "([{]})";
+
+        System.out.println(isValid(s1));
+        System.out.println(isValid(s2));
+    }
+}
+
+
 Given an integer array nums, find the subarray with the largest sum, and
 
 Example 1:
